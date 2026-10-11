@@ -22,7 +22,7 @@ chmod +x filmcraft-0.6.0-ubuntu20.04-x86_64.AppImage
 ```
 
 The identical file (same SHA256, built once) is also in the full-suite release:
-[artcraft-launcher-ubuntu20.04 @ v0.2.0-suite-ubuntu20.04](https://github.com/PSNarayananmc/artcraft-launcher-ubuntu20.04/releases/tag/v0.2.0-suite-ubuntu20.04).
+[artcraft-launcher-ubuntu20.04 @ v0.2.0-suite-ubuntu20.04](https://github.com/PSNarayananmc/artcraft-launcher-ubuntu20.04/releases/tag/v0.2.0-suite-ubuntu20.04-r2).
 
 ## GPU note
 

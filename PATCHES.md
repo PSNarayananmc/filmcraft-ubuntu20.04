@@ -30,4 +30,4 @@ To activate, move it to `.github/workflows/` with a token that has the workflow 
 ## Also rebuilt
 
 The identical FilmCraft 0.6.0 AppImage (same SHA256) is also part of the full suite
-release: https://github.com/PSNarayananmc/artcraft-launcher-ubuntu20.04/releases/tag/v0.2.0-suite-ubuntu20.04
+release: https://github.com/PSNarayananmc/artcraft-launcher-ubuntu20.04/releases/tag/v0.2.0-suite-ubuntu20.04-r2
