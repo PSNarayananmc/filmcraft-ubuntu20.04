@@ -1,0 +1,6 @@
+/target/
+/dist/
+/squashfs-root/
+*.AppImage
+*.AppImage.zsync
+SHA256SUMS
