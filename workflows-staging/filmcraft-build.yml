@@ -1,0 +1,140 @@
+name: Build FilmCraft for Ubuntu 20.04 (glibc 2.31)
+
+# STAGED — move this file to .github/workflows/filmcraft-build.yml to activate
+# (the token used during the rebuild could not create files under .github/workflows/).
+#
+# Builds FilmCraft from upstream storytold/filmcraft at the pinned tag inside a real
+# ubuntu:20.04 container, verifies it (glibc / ldd / smoke / sha256 — the job FAILS if
+# any check fails), then publishes a BRAND-NEW pre-release. The tag is collision-checked
+# against existing tags and releases (v0.6.0-ubuntu20.04, then -r2, -r3, …) and a 422
+# "already exists" fails the job instead of overwriting anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a new pre-release after building'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build filmcraft
+    runs-on: ubuntu-22.04
+    container:
+      image: ubuntu:20.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      APPIMAGE_EXTRACT_AND_RUN: '1'
+      CARGO_INCREMENTAL: '0'
+      UPSTREAM_TAG: v0.6.0
+      UPSTREAM_COMMIT: 2ff3f5e266838700c292a35aaf762e3d4dcef980
+    steps:
+      - name: Install system packages (git BEFORE actions/checkout)
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev libasound2-dev libvulkan-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev \
+            libxcb1-dev libxrandr-dev libxi-dev libxcursor-dev libgtk-3-dev \
+            libgl1-mesa-dev libgl1-mesa-dri libegl-mesa0 libegl1 cmake git curl \
+            ca-certificates file desktop-file-utils squashfs-tools xz-utils \
+            python3 binutils wget zsync appstream jq xvfb xauth
+          git --version
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Clone upstream storytold/filmcraft at pinned tag
+        run: |
+          set -eux
+          git clone --depth 1 --branch "$UPSTREAM_TAG" https://github.com/storytold/filmcraft.git upstream
+          test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+      - name: Install Rust (stable)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build + package AppImage
+        run: |
+          set -eux
+          cd upstream
+          bash packaging/linux/package.sh --formats appimage
+      - name: Verify (glibc / ldd / smoke / sha256)
+        env:
+          GUI_BIN: filmcraft
+          CLI_BIN: filmcraft-cli
+        run: bash scripts/verify-appimage.sh filmcraft upstream
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filmcraft-appimage
+          path: |
+            upstream/dist/release/*.AppImage
+            upstream/dist/release/*.AppImage.zsync
+            verify/*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish new pre-release (never overwrites)
+    needs: build
+    if: ${{ inputs.release }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      TAG_BASE: v0.6.0-ubuntu20.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: filmcraft-appimage
+          path: artifact
+      - name: Pick a free tag and publish (fail on collision, never overwrite)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          API=https://api.github.com
+          AUTH=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          RELS=$(mktemp); TAGS=$(mktemp)
+          curl -sSf "${AUTH[@]}" "$API/repos/$OWNER/$REPO/releases?per_page=100" > "$RELS"
+          curl -sSf "${AUTH[@]}" "$API/repos/$OWNER/$REPO/git/matching-refs/tags/$TAG_BASE" > "$TAGS"
+          TAG=""
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            CAND="$TAG_BASE"; [ "$i" = 1 ] || CAND="$TAG_BASE-r$i"
+            t=$(jq -r --arg r "refs/tags/$CAND" '[.[].ref] | index($r) != null' "$TAGS")
+            r=$(jq -r --arg c "$CAND" '[.[].tag_name, .[].name] | index($c) != null' "$RELS")
+            [ "$t" != "true" ] && [ "$r" != "true" ] && { TAG="$CAND"; break; }
+            echo "$CAND exists, trying next"
+          done
+          [ -n "$TAG" ] || { echo "no free tag for base $TAG_BASE"; exit 1; }
+          SUFFIX=""; [ "$TAG" = "$TAG_BASE" ] || SUFFIX="-${TAG##*"$TAG_BASE"-}"
+          SRC=$(ls artifact/filmcraft-*-linux-x86_64.AppImage)
+          VERSION=$(basename "$SRC" | sed -E 's/^filmcraft-//; s/-linux-.*//')
+          ASSET="filmcraft-$VERSION-ubuntu20.04$SUFFIX-x86_64.AppImage"
+          STAGE=$(mktemp -d)
+          cp "$SRC" "$STAGE/$ASSET"
+          ( cd "$STAGE" && sha256sum "$ASSET" > SHA256SUMS )
+          PREV=$(jq -r 'sort_by(.published_at) | last | .tag_name // empty' "$RELS")
+          BODY=$(jq -n --arg tag "$TAG" --arg prev "$PREV" \
+            '{tag_name: $tag, name: $tag, prerelease: true,
+              body: ("FilmCraft rebuilt on a glibc-2.31 base (GitHub Actions ubuntu-22.04 runner, container ubuntu:20.04) for Ubuntu 20.04 LTS.\n\nUnmodified upstream source at the pinned tag; verification and checksums attached.\n" + (if $prev != "" then "Follows release " + $prev + " (untouched).\n" else "First release in this repo.\n" end))}')
+          REL=$(mktemp)
+          HTTP=$(curl -sS -o "$REL" -w "%{http_code}" "${AUTH[@]}" -X POST \
+            "$API/repos/$OWNER/$REPO/releases" -d "$BODY")
+          [ "$HTTP" = "201" ] || { echo "release create failed: HTTP $HTTP"; cat "$REL"; exit 1; }
+          REL_ID=$(jq -r .id "$REL")
+          REL_URL=$(jq -r .html_url "$REL")
+          for f in "$STAGE/$ASSET" "$STAGE/SHA256SUMS" artifact/verification.md; do
+            [ -f "$f" ] || continue
+            curl -sSf "${AUTH[@]}" -X POST --data-binary "@$f" \
+              -H "Content-Type: application/octet-stream" \
+              "$API/repos/$OWNER/$REPO/releases/$REL_ID/assets?name=$(basename "$f")" >/dev/null
+          done
+          echo "published: $REL_URL ($TAG)"
